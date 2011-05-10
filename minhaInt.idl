@@ -1,0 +1,4 @@
+interface minhaInt { 
+	double foo (in double a, in double b, out string c); 
+	void boo (inout double a); 
+};
