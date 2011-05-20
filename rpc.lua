@@ -9,11 +9,13 @@ module(..., package.seeall);
 --tabelas do módulo
 servants 	= { }
 proxies 	= { }
+sockets 	= { }
+
 limit 		= 5
 debug		= true
 
 --tabela que será utilizada na chamada setmetatable para possibilitar o tratamento 
---antes e depois das chamadas aos stubs
+--antes e depois das chamadas dos métodos dos stubs
 metatable 	= {
 
 	__call = function (t,...)
@@ -24,7 +26,7 @@ metatable 	= {
 		-- realiza marshalling dos dados
 		--local request = marshall(t.name[1],...)
 		
-		logger("__call: ",t.name[1], ...)
+		logger("__call: ",t.name, ...)
 
 		-- tratamento da chamada
 		--return handleData(t,request)
@@ -35,7 +37,6 @@ metatable 	= {
 ----------------------------------
 -- funções "públicas" do módulo --
 ----------------------------------
-
 
 ------------------------------------------------------------------
 -- rpc.createServant()
@@ -54,17 +55,22 @@ function rpc.createServant(impl, idlfile, port)
 	local _port = port or 55000+#rpc.servants
 	local serversocket = assert(socket.bind("*", _port))
 
-	--flag tcp-nodelay
+	-- flag tcp-nodelay
 	serversocket:setoption("tcp-nodelay", true)
+	table.insert(sockets, serversocket)
 
 	-- cria stub a partir da interface idl
 	local stub = parseIDL(idlfile)
 
-	--insere objs na tabela servants
-	table.insert(servants, {stub, impl, serversocket})
+	-- insere impl do servant na tabela
+	table.insert(servants, impl)
+
+	-- insere stub e impl indexado pelo socket para acesso direto
+	servants[serversocket] = { }
+	table.insert(servants[serversocket], {stub, impl})
 	
 	local ip, port = serversocket:getsockname()
-	logger("createServant", "ip: " .. ip, "port: " .. port)
+	logger("createServant", "port: " .. port)
 
 	return stub
 end
@@ -77,9 +83,13 @@ end
 ------------------------------------------------------------------
 function rpc.waitIncoming()
 
-	--while true do
-	--TODO
-	--end
+	while true do
+	
+		--TODO
+		logger("waitIncoming", "aguardando requisição")
+		local read, write, err = socket.select(sockets)
+
+	end
 
 end
 
@@ -108,10 +118,9 @@ end
 
 
 
-----------------------------------
--- funções auxiliares do módulo --
-----------------------------------
-
+--------------------------------------
+-- funções auxiliares do módulo rpc --
+--------------------------------------
 
 ------------------------------------------------------------------
 -- logger()
