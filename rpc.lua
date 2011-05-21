@@ -96,6 +96,11 @@ function rpc.waitIncoming()
 		for i=1, #read do
 			--socket sendo tratado
 			socket = #read[i]
+			
+			--recebe requisicao
+			req, err = socket:receive("*a")
+
+			logger()
 
 			--servant existe
 			if servants[socket] then
@@ -107,7 +112,7 @@ function rpc.waitIncoming()
 				--closeConnection()
 				--end
 
-				handleData(servants[socket])
+				--(servants[socket])
 			else
 				--trata nova conexao
 				handleConnection(socket)
@@ -131,16 +136,18 @@ end
 -- Stub que reflete a definição do arquivo.idl
 ------------------------------------------------------------------
 function rpc.createProxy(ip, port, idlfile)
-	-- cria tabela do proxy
-	local proxy = { _ip = ip, _port = port, socket = nil }
-	table.insert(proxies,proxy)
 
 	-- cria stub a partir da interface idl
 	local stub = parseIDL(idlfile)
 
+	-- cria tabela do proxy
+	local proxy = { _ip = ip, _port = port, _socket = nil, _stub = stub }
+	
 	-- insere stub na tabela de proxies
 	proxies[stub.name] = { }
-	table.insert(proxies[stub.name], {stub=stub, proxy=proxy})
+	table.insert(proxies[stub.name], proxy)
+
+	logger("createProxy",stub.name, proxy._ip)
 	
 	return stub
 end
@@ -178,9 +185,31 @@ end
 ------------------------------------------------------------------
 function handleData(stub, request)
 
-	logger("handleData", "Tratando requisicao para: " .. stub.name .. " req: [" .. request .. "]")
+	logger("handleData", "Tratando requisicao para: " .. stub.name .. " req: [" .. request .. "]" )
 
-	--TODO
+	--[[if(proxies[stub.name] == nil) then
+		logger("handleData", "proxy é nulo!")
+	end
+
+	local ip = proxies[stub.name]._ip
+	local port = proxies[stub.name]._port
+	local sock = proxies[stub.name]._socket
+
+	logger("handleData", ip,port,sock)
+
+	--cria conexao do proxy com o servidor
+	if(sock == nil) then
+		logger("handleData", "criando conexão: " .. ip .. ":" .. port)
+		proxies[stub.name].proxy._socket = assert(socket.connect(ip,port))
+		proxies[stub.name].proxy._socket:setoption("tcp-nodelay", true)
+		proxies[stub.name].proxy._socket:setoption("reuseaddr", true)
+		sock = proxies[stub.name].proxy._socket
+	end
+
+	assert(sock ~= nil, "a conexão não foi estabelecida!")
+
+	--envia requisicao
+	ret,err=sock:send(request)]]--
 end
 
 ------------------------------------------------------------------
