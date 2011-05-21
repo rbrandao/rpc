@@ -62,7 +62,10 @@ function rpc.createServant(impl, idlfile, port)
 	table.insert(sockets, serversocket)
 
 	-- cria stub a partir da interface idl
-	local stub = parseIDL(idlfile)
+	--local stub = parseIDL(idlfile)
+	local interface_file = io.open(idlfile)
+	
+	local stub = loadstring(" interface = function ( itable ) return itable end return " .. interface_file:read("*all"))()
 
 	-- insere impl do servant na tabela
 	table.insert(servants, impl)
