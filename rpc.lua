@@ -20,16 +20,18 @@ metatable 	= {
 
 	__call = function (t,...)
 
+		logger("__call: ",t.name)
+
 		-- checagem de tipos de dados
-		--typeCheck(t,...)
+		checkedArgs = argsTypeCheck(t,...)
 
-		-- realiza marshalling dos dados
-		--local request = marshall(t.name[1],...)
+		-- realiza serializing dos dados
+		local request = serialize(t.name,checkedArgs)
 		
-		logger("__call: ",t.name, ...)
-
 		-- tratamento da chamada
-		--return handleData(t,request)
+		local ret = handleData(t,request)
+
+		--return deserialize(request)
 	end
 }
 
@@ -86,8 +88,31 @@ function rpc.waitIncoming()
 	while true do
 	
 		--TODO
-		logger("waitIncoming", "aguardando requisição")
+		logger("waitIncoming", "aguardando requisições")
 		local read, write, err = socket.select(sockets)
+		logger("waitIncoming", "requisicoes recebidas:" .. #read)
+
+		--trata requisicoes
+		for i=1, #read do
+			--socket sendo tratado
+			socket = #read[i]
+
+			--servant existe
+			if servants[socket] then
+
+				--recebe requisicao
+				--req, err = socket:receive("*l")
+				--
+				--if req == nil then
+				--closeConnection()
+				--end
+
+				handleData(servants[socket])
+			else
+				--trata nova conexao
+				handleConnection(socket)
+			end
+		end
 
 	end
 
@@ -106,14 +131,18 @@ end
 -- Stub que reflete a definição do arquivo.idl
 ------------------------------------------------------------------
 function rpc.createProxy(ip, port, idlfile)
-	-- estabelece conexão com servidor e cria a tabela proxy
-	--local proxy = { _conn = nil, _ip = ip, _port = port, }
-	--table.insert(proxies,proxy)
+	-- cria tabela do proxy
+	local proxy = { _ip = ip, _port = port, socket = nil }
+	table.insert(proxies,proxy)
 
-	-- call the interface parser
-	-- return parseIDL(idlfile)
+	-- cria stub a partir da interface idl
+	local stub = parseIDL(idlfile)
 
-
+	-- insere stub na tabela de proxies
+	proxies[stub.name] = { }
+	table.insert(proxies[stub.name], {stub=stub, proxy=proxy})
+	
+	return stub
 end
 
 
@@ -138,9 +167,7 @@ end
 ------------------------------------------------------------------
 -- handleData()
 --
--- Trata o despacho dos dados para o stub definido. Este método 
--- deve serializar os dados (caso ja nao estejam), invocar o método 
--- definido na requisição e retornar os dados deserializados
+-- Trata o despacho dos dados para o stub definido.
 --
 -- Parâmetros: 
 -- stub: Stub que receberá a requisição
@@ -150,6 +177,8 @@ end
 -- Resultados desempacotadas (unpacked) dos dados deserializados
 ------------------------------------------------------------------
 function handleData(stub, request)
+
+	logger("handleData", "Tratando requisicao para: " .. stub.name .. " req: [" .. request .. "]")
 
 	--TODO
 end
@@ -166,6 +195,9 @@ end
 ------------------------------------------------------------------
 function handleConnection(socket)
 
+	local ip, port = socket:getsockname()
+	logger("handleConnection", "Tratando nova conexão para: " .. ip .. ":" .. port)
+
 	--TODO
 
 end
@@ -175,17 +207,59 @@ end
 --
 -- Função para verificar se os tipos dos parâmetros passados estão
 -- de acordo. Caso haja alguma incompatibilidade que não possa ser
--- tratada a execução será abortada e um erro é apresentado. Através
+-- tratada a execução será abortada e um erro é apresentado através
 -- da chamada 'assert'.
 --
 -- Parâmetros: 
 -- stub: Stub que está sendo chamado
 -- (...): Parâmetros de chamada
 ------------------------------------------------------------------
-function argsTypeCheck(stub, ...)
+function argsTypeCheck(method, ...)
+	local nargs=select('#', ...)
+	local checkedArgs = {}
 
-	--TODO
+	logger("argsTypeCheck", "metodo: " .. method.name, "nargs:" .. #method.args)
 
+	--verifica os tipos passados
+	for i=1, #method.args do
+		local checkedValue = nil
+		local argvalue = select(i,...)
+		logger("argsTypeCheck", "valor " .. i .. ": " .. tostring(argvalue), "recebido: " .. type(argvalue), "definição: " .. method.args[i].type)
+
+		
+		--verifica compatibilidade dos parametros
+		if(method.args[i].type == "double" or method.args[i].type == "int" ) then
+			
+			--verifica ausencia do parametro
+			if(type(argvalue) == "nil") then
+				checkedValue = 0
+				logger("argsTypeCheck", "parâmetro inexistente: " .. method.args[i].name, "valor atribuído: " .. checkedValue)
+			else
+				--caso exista verifica o tipo
+				assert(type(argvalue) == "number", "parâmetro inválido: " .. type(argvalue) .. " (definição: number)")
+			end
+
+
+		elseif(method.args[i].type == "string" or method.args[i].type == "char") then
+
+			--verifica ausencia do parametro
+			if(type(argvalue) == "nil") then
+				checkedValue = "nil"
+				logger("argsTypeCheck", "parâmetro inexistente: " .. method.args[i].name, "valor atribuído: \""..checkedValue.."\"")
+			else
+				--caso exista verifica o tipo
+				assert(type(argvalue) == "string", "parâmetro inválido: " .. type(argvalue) .. " (definição: string)")
+			end
+		end
+	
+		--insere parametro checado, com valor default caso ele nao tenha sido passado
+		table.insert(checkedArgs, checkedValue or argvalue)
+		logger("argsTypeCheck", "inserindo " .. (checkedValue or argvalue))
+	end
+			
+	logger("argsTypeCheck", unpack(checkedArgs))
+
+	return checkedArgs
 end
 
 ------------------------------------------------------------------
@@ -207,24 +281,42 @@ function returnTypeCheck(stub, ...)
 end
 
 ------------------------------------------------------------------
--- marshall()
+-- serialize()
 --
 -- Função para serializar os dados de acordo com a especificação
 -- do protocolo de transmissão
 --
 -- Parâmetros: 
--- (...): Parâmetros da chamada
+-- method: Tabela do método
+-- args: Parâmetros da chamada
 --
 -- Retorno:
 -- String codificada, ex: "metodo\narg1\narg2\narg3"
 ------------------------------------------------------------------
-function marshall(...)
+function serialize(method,args)
 
-	--TODO
+	local str="" .. method .. "\n"
+	
+	for i=1,#args do
+
+		local param=args[i]
+
+		if(type(param)=="string") then
+			param = string.gsub(param,"%\n","\\n")
+			str=str .. param .. "\n"
+		else
+			str=str .. tostring(param) .. "\n"
+		end
+	end
+
+	logger("serialize", "["..str.."]")
+
+	return str
+	
 end
 
 ------------------------------------------------------------------
--- unmarshall()
+-- deserialize()
 --
 -- Função para deserializar os dados de acordo com a especificação
 -- do protocolo de transmissão
@@ -235,9 +327,14 @@ end
 -- Retorno:
 -- Lista com valores decodificados
 ------------------------------------------------------------------
-function unmarshall(str)
+function deserialize(str)
+	local list = {}
+	for word in string.gmatch(str, "%w+") do 
+		table.insert(list,word)
+		logger("deserialize", word)
+	end
 
-	--TODO
+	return list
 end
 
 ------------------------------------------------------------------
@@ -254,10 +351,10 @@ end
 ------------------------------------------------------------------
 function invokeMethod(servant, request)
 	--TODO
-	--unmarshall
+	--deserialize
 	--desempacota params (remove o primeiro, que o nome do metodo)
 	--chama metodo no obj com a implementacao
-	--marshall do resultado
+	--serialize do resultado
 	--retorna o resultado 
 end
 
@@ -287,6 +384,7 @@ function parseIDL(idlfile)
 	local interface_match = string.gmatch(interface,"%s*interface%s*(%w+)%s*{([^{}]+)}%s*;%s*")
 	name, methods = interface_match()
 
+	stub.name = name
 	logger('parseIDL: ', name)
 
 	local method_match = string.gmatch(methods,"%s*(%a+)%s*(%w+)%s*\(.-\)%s*;")
@@ -301,13 +399,14 @@ function parseIDL(idlfile)
 
 
 		--tabela deste metodo no stub
-		stub[methods] = {
-			name = { method },
-			result = { returntype },
-			args = {}
+		stub[method] = { 
+			name = method, 
+			result = { returntype }, 
+			args = { } 
 		}
 
-		setmetatable(stub[methods],metatable)
+		--metatable dos metodos para possibilitar a chamada (__call)
+		setmetatable(stub[method],metatable)
 
 		--imprime metodos
 		logger('parseIDL: ', "return: " .. returntype, "method: " .. method, "param: " .. param)
@@ -325,14 +424,14 @@ function parseIDL(idlfile)
 			end
 			
 			--insere os metodos no stub
-			stub[methods].args[#stub[methods].args+1] = { direction=direction, type=paramtype }
+			stub[method].args[#stub[method].args+1] = { name=argname, direction=direction, type=paramtype }
 
 			--caso a direcao do parametro seja out ou inout adiciona como resultado
 			if(direction == "out" or direction == "inout") then
-				table.insert(stub[methods].result, paramtype)
+				table.insert(stub[method].result, paramtype)
 			end
 
-			logger('parseIDL: ', "arg: " .. #stub[methods].args, "direction: " .. direction, "type: " .. paramtype)
+			logger('parseIDL: ', "arg: " .. argname, "direction: " .. direction, "type: " .. paramtype)
 		end
 
 	end
