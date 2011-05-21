@@ -1,0 +1,23 @@
+interface { name = "minhaInt",
+            methods = {
+               { name = "foo",
+                 result = "double",
+                 args = {{ direction = "in",
+                           type = "double"},
+                         { direction = "in",
+                           type = "double"},
+                         { direction = "out",
+                           type = "string"},
+                        }
+
+               },
+               { name = "boo",
+                 result = "void",
+                 args = {{ direction = "inout",
+                          type = "double"},
+                        }
+               }
+             }
+            }
+           
+
