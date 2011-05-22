@@ -7,12 +7,19 @@ local socket, dofile, ipairs, next, pairs, string, tonumber, tostring, unpack, g
 module(..., package.seeall);
 
 --tabelas do módulo
-servants 	= { }
-proxies 	= { }
-sockets 	= { }
+servants 	  = { }
+proxies 	  = { }
+sockets 	  = { }
+proxy_connections = { }
 
-limit 		= 5
-debug		= true
+--tipo da conexao dos proxies (1=sob demanda, abre e fecha a conexao sempre; 2=mantem conexao aberta)
+connection_type = 2
+
+--limite de conexoes atendidas simultaneamente
+limit 		= 3
+
+--flag que define se as mensagens de debug devem ser exibidas
+debug		= false
 
 --tabela que será utilizada na chamada setmetatable para possibilitar o tratamento 
 --antes e depois das chamadas dos métodos dos stubs
@@ -20,18 +27,16 @@ metatable 	= {
 
 	__call = function (t,...)
 
-		logger("__call: ",t.name)
+		logger("__call:", t.name)
 
 		-- checagem de tipos de dados
 		checkedArgs = argsTypeCheck(t,...)
 
 		-- realiza serializing dos dados
 		local request = serialize(t.name,checkedArgs)
-		
-		-- tratamento da chamada
-		local ret = handleData(t,request)
-
-		--return deserialize(request)
+	
+		-- envia dados pro servidor e retorna valores obtidos
+		return handleDataDispatch(t,request)
 	end
 }
 
@@ -72,10 +77,11 @@ function rpc.createServant(impl, idlfile, port)
 
 	-- insere stub e impl indexado pelo socket para acesso direto
 	servants[serversocket] = { }
-	table.insert(servants[serversocket], {stub, impl})
+	table.insert(servants[serversocket], stub)
+	table.insert(servants[serversocket], impl)
 	
 	local ip, port = serversocket:getsockname()
-	logger("createServant", "port: " .. port)
+	logger("createServant", "aguardando conexões na porta: " .. port)
 
 	return stub
 end
@@ -101,13 +107,54 @@ function rpc.waitIncoming()
 			sock = read[i]
 			local ip, port = sock:getsockname()
 
+			if(servants[sock]) then
+				logger("waitIncoming", "tratando nova conexao para servant")
+				handleClientConnection(sock)
+			else
+				logger("waitIncoming", "atendendo requisicao na porta " .. port .. " (cliente previamente conectado)")
 
-			logger("waitIncoming", "atendendo requisicao na porta " .. port)
-			local client = sock:accept()
-			
-			req, err = client:receive("*a")
-			logger("waitIncoming", "recebido: "..req)
+				--identifica metodo da requisicao
+				meth, err = sock:receive("*l")
 
+				if(meth ~= nil) then
+					logger("waitIncoming", "metodo recebido: "..meth)
+
+					request = meth .. "\n"
+
+					--while(true) do
+					local stub = proxy_connections[sock][1]
+					for i=1, #stub[meth].args do
+						local param,err=sock:receive("*l")
+
+						if param == nil then
+							break
+						end
+
+						logger("waitIncoming", "param recebido: " .. param)
+
+						request = request .. param .. "\n"
+					end
+
+					logger("waitIncoming", "recebida requisicao (cliente previamente conectado): " .. "["..request.."]")
+
+					--invoca metodo no servant
+					if(proxy_connections[sock]) then
+						local ret = invokeMethod(proxy_connections[sock],request)
+						logger("handleClientConnection", "respondendo: ","["..ret.."]")
+					
+						--retorna valor para o cliente
+						sock:send(ret)
+					end
+
+				else
+					logger("waitIncoming", "fechando conexão: ",#servants+1,err,err2)
+					local s = sockets[#servants+1]
+					s:close()
+					proxy_connections[sock][1] = nil
+					proxy_connections[sock][2] = nil
+					table.remove(sockets,#servants+1)
+				end
+			end
 		end
 
 	end
@@ -164,32 +211,32 @@ function logger(...)
 end
 
 ------------------------------------------------------------------
--- handleData()
+-- handleDataDispatch()
 --
--- Trata o despacho dos dados para o stub definido.
+-- Trata o despacho dos dados através do proxy definido.
 --
 -- Parâmetros: 
--- stub: Stub que receberá a requisição
+-- stub: Proxy que receberá a requisição
 -- request: String com os dados serializados
 --
 -- Retorno:
 -- Resultados desempacotadas (unpacked) dos dados deserializados
 ------------------------------------------------------------------
-function handleData(stub, request)
+function handleDataDispatch(stub, request)
 
-	logger("handleData", "Enviando requisicao: " .. stub.name .. " req: [" .. request .. "]" )
+	logger("handleDataDispatch", "enviando requisicao: " .. stub.name .. " req: [" .. request .. "]" )
 
-	assert(stub.proxy ~= nil, "handleData: proxy é nulo! (stub.name=" .. stub.name ..")")
+	assert(stub.proxy ~= nil, "handleDataDispatch: proxy é nulo! (stub.name=" .. stub.name ..")")
 
 	local ip = stub.proxy._ip
 	local port = stub.proxy._port
 	local sock = stub.proxy._socket
 
-	logger("handleData", ip,port,sock)
+	logger("handleDataDispatch", ip,port,sock)
 
 	--cria conexao do proxy com o servidor
-	if(sock == nil) then
-		logger("handleData", "criando conexão: " .. ip .. ":" .. port)
+	if(sock == nil) then 
+		logger("handleDataDispatch", "criando conexão: " .. ip .. ":" .. port)
 		stub.proxy._socket = assert(socket.connect(ip,port))
 		stub.proxy._socket:setoption("tcp-nodelay", true)
 		stub.proxy._socket:setoption("reuseaddr", true)
@@ -200,10 +247,57 @@ function handleData(stub, request)
 
 	--envia requisicao
 	ret,err=sock:send(request)
+	if(err=="closed") then
+		logger("handleDataDispatch", "conexão fechada, reenviando...")
+		sock:close()
+
+		stub.proxy._socket = nil
+		handleDataDispatch(stub, request)
+	end
+
+	--aguarda retorno dos dados
+	logger("handleDataDispatch", "aguardando resposta do servidor")
+	local status, err = sock:receive("*l")
+
+	if(err=="closed") then
+		logger("handleDataDispatch", "conexão fechada, reenviando...")
+		sock:close()
+
+		stub.proxy._socket = nil
+		handleDataDispatch(stub, request)
+	end
+
+
+	--verifica estado de erro da chamada
+	assert(status=="0", "handleDataDispatch: metodo " .. stub.name .. " retornou estado de erro: " .. tostring(err))
+
+	--tabela com resultados da chamada
+	local results = {}
+
+	--le os resultados linha a linha
+	for i=1, #stub.result do 
+		local req2, err = sock:receive("*l")
+
+		table.insert(results,req2)
+		logger("handleDataDispatch", "param recebido: "..req2)
+
+	end
+
+	--mantem a conexao aberta ou fecha de acordo com a politica definida
+	if(connection_type==1) then
+
+		logger("handleDataDispatch", "fechando conexão! (política sob-demanda)")
+		sock:close()
+		proxy_connections[sock] = nil
+		stub.proxy._socket = nil
+	end
+
+	return unpack(results)
+
 end
 
 ------------------------------------------------------------------
--- handleConnection()
+-- handleClientConnection()
 --
 -- Trata a requisição de conexção de um novo cliente. O novo socket
 -- será adicionado a tabela 'sockets' e deverá então ser tratado
@@ -212,18 +306,59 @@ end
 -- Parâmetros: 
 -- socket: Socket do cliente
 ------------------------------------------------------------------
-function handleConnection(sock)
+function handleClientConnection(sock)
 
 	-- aceita pedido de conexao
 	local client = sock:accept()
 
 	--imprime ip e porta
 	local ip, port = sock:getsockname()
-	logger("handleConnection", "Tratando nova conexão para: " .. ip .. ":" .. port)
+	logger("handleClientConnection", "Tratando conexão na porta:" .. port)
 
-	--recebe requisicao
-	req, err = sock:receive("*a")
-	logger("handleConnection", "recebido: "..req)
+	--identifica metodo da requisicao
+	meth, err = client:receive("*l")
+	logger("handleClientConnection", "metodo recebido: "..meth)
+
+	local stub = servants[sock][1]
+	local impl = servants[sock][2]
+	local req = "" .. meth .. "\n"
+
+	--le os parametros linha a linha
+	for i=1, #stub[meth].args do 
+		local req2, err = client:receive("*l")
+
+		req = req .. req2 .. "\n"
+		logger("handleClientConnection", "param recebido: "..req2)
+
+	end
+
+	-- chama método
+	local ret = invokeMethod(servants[sock],req)
+	logger("handleClientConnection", "respondendo: ","["..ret.."]")
+
+	client:send(ret)
+
+	-- insere socket do cliente na lista de conexoes
+	table.insert(sockets, client)
+	proxy_connections[client] = { }
+	table.insert(proxy_connections[client], servants[sock][1])
+	table.insert(proxy_connections[client], servants[sock][2])
+
+	--limite de conexoes atingido
+	local clients = #sockets - #servants
+	if(clients > limit) then
+		print("handleClientConnection", "número máximo de clientes atingido: limite=" .. limit .. " clientes=" .. clients )
+		
+		--remove primeiro socket ser de servants
+		sockets[#servants+1]:close()
+		table.remove(sockets,#servants+1)
+	
+		clients = #sockets - #servants
+		print("handleClientConnection", "fechando conexão, total de clientes: " .. clients .. " (" .. #servants .. " servants e "..clients.." clientes)")
+
+	else
+		print("handleClientConnection", "clientes em atendimento: limite=" .. limit .. " clientes=" .. clients)
+	end
 
 end
 
@@ -296,13 +431,34 @@ end
 -- da chamada 'assert'.
 --
 -- Parâmetros: 
--- stub: Stub que está sendo chamado
--- (...): Valores retornados
+-- method: Tabela do stub com método que está sendo chamado
+-- results: Tabela com valores retornados
 ------------------------------------------------------------------
-function returnTypeCheck(stub, ...)
+function returnTypeCheck(method, results)
 
-	--TODO
+	logger("returnTypeCheck", "verificando valores retornados para: " .. method.name)
+	for i=1,#results do
+		logger("returnTypeCheck", "return " ..i ..": "..results[i])
+	end
 
+	for i=1,#method.result do
+		logger("returnTypeCheck", "esperado " .. i .. ": " .. method.result[i])
+	end
+
+	local nresults = #method.result
+	--assert(results.n==nresults, "returnTypeCheck: número de valores retornados do servant incompatível: " .. unpack(results) .. " (esperado: " .. unpack(method.result)..")")
+
+	for i=1,nresults do
+		--logger("returnTypeCheck", "valor retornado: " .. type(results[i]) .. " esperado: " .. method.result[i])
+
+		if ((method.result[i] == "int") or (method.result[i] == "double")) then
+			assert( type(results[i]) == "number", "returnTypeCheck: retorno do método " .. method.name .. ": arg"..i.. " (" .. type(results[i])..")" .. " esperado: number")
+		
+		elseif ((method.result[i] == "string") or (method.result[i] == "char")) then
+			assert( type(results[i]) == "string", "returnTypeCheck: retorno do método " .. method.name .. ": arg"..i.. " (" .. type(results[i]) ..")" .. " esperado: string")
+
+		end
+	end
 end
 
 ------------------------------------------------------------------
@@ -369,18 +525,43 @@ end
 --
 -- Parâmetros: 
 -- servant: Tabela com o servant que irá processar a chamada
--- request: Requisição que este servant irá processar
+-- request: String com a requisição que este servant irá processar
 --
 -- Retorno:
--- O valor retornado pela implementação do servant
+-- O valor retornado pela implementação do servant já serializado
 ------------------------------------------------------------------
 function invokeMethod(servant, request)
-	--TODO
-	--deserialize
-	--desempacota params (remove o primeiro, que o nome do metodo)
-	--chama metodo no obj com a implementacao
-	--serialize do resultado
-	--retorna o resultado 
+	function pack(...)
+		return arg
+	end
+
+	--deserializa requisicao
+	local list = deserialize(request)
+
+	--remove primeiro item (nome do metodo)
+	local meth = table.remove(list,1)
+	logger("invokeMethod", "chamando método: " .. meth)
+
+	--verifica existencia do metodo
+	local stub = servant[1]
+	local impl = servant[2]
+	local ret = {}
+
+	if(impl[meth]==nil) then
+		logger("invokeMethod", "método inexistente no servant (" .. meth ..")")
+
+		--retorna erro (zero)
+		return "1"
+	else
+		--agrupa todos os retornos da chamada
+		ret = pack(impl[meth](unpack(list)))
+	end
+
+
+	--checa os valores retornos
+	returnTypeCheck(stub[meth], ret)
+
+	return serialize("0",ret)
 end
 
 -----------------------------------------------------------------
@@ -426,10 +607,15 @@ function parseIDL(idlfile, proxy)
 		--tabela deste metodo no stub
 		stub[method] = { 
 			name = method, 
-			result = { returntype }, 
+			result = { }, 
 			args = { },
 			proxy = proxy or { }, 
 		}
+		--insere valor de retorno
+		if(returntype ~= "void") then
+			table.insert(stub[method].result, returntype)
+		end
+
 
 		--metatable dos metodos para possibilitar a chamada (__call)
 		setmetatable(stub[method],metatable)

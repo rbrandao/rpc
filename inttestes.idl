@@ -1,0 +1,5 @@
+interface inttestes {
+  double foo (in double a, in double b, inout double c);
+  void boo (void);
+  double bar (in string s);
+};
