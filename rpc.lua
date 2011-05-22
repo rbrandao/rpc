@@ -62,10 +62,10 @@ function rpc.createServant(impl, idlfile, port)
 	table.insert(sockets, serversocket)
 
 	-- cria stub a partir da interface idl
-	--local stub = parseIDL(idlfile)
-	local interface_file = io.open(idlfile)
+	local stub = parseIDL(idlfile)
 	
-	local stub = loadstring(" interface = function ( itable ) return itable end return " .. interface_file:read("*all"))()
+	--local interface_file = io.open(idlfile)
+	--local stub = loadstring(" interface = function ( itable ) return itable end return " .. interface_file:read("*all"))()
 
 	-- insere impl do servant na tabela
 	table.insert(servants, impl)
@@ -98,28 +98,16 @@ function rpc.waitIncoming()
 		--trata requisicoes
 		for i=1, #read do
 			--socket sendo tratado
-			socket = #read[i]
+			sock = read[i]
+			local ip, port = sock:getsockname()
+
+
+			logger("waitIncoming", "atendendo requisicao na porta " .. port)
+			local client = sock:accept()
 			
-			--recebe requisicao
-			req, err = socket:receive("*a")
+			req, err = client:receive("*a")
+			logger("waitIncoming", "recebido: "..req)
 
-			logger()
-
-			--servant existe
-			if servants[socket] then
-
-				--recebe requisicao
-				--req, err = socket:receive("*l")
-				--
-				--if req == nil then
-				--closeConnection()
-				--end
-
-				--(servants[socket])
-			else
-				--trata nova conexao
-				handleConnection(socket)
-			end
 		end
 
 	end
@@ -140,11 +128,12 @@ end
 ------------------------------------------------------------------
 function rpc.createProxy(ip, port, idlfile)
 
-	-- cria stub a partir da interface idl
-	local stub = parseIDL(idlfile)
 
 	-- cria tabela do proxy
-	local proxy = { _ip = ip, _port = port, _socket = nil, _stub = stub }
+	local proxy = { _ip = ip, _port = port, _socket = nil }
+	
+	-- cria stub a partir da interface idl
+	local stub = parseIDL(idlfile, proxy)
 	
 	-- insere stub na tabela de proxies
 	proxies[stub.name] = { }
@@ -188,31 +177,29 @@ end
 ------------------------------------------------------------------
 function handleData(stub, request)
 
-	logger("handleData", "Tratando requisicao para: " .. stub.name .. " req: [" .. request .. "]" )
+	logger("handleData", "Enviando requisicao: " .. stub.name .. " req: [" .. request .. "]" )
 
-	--[[if(proxies[stub.name] == nil) then
-		logger("handleData", "proxy é nulo!")
-	end
+	assert(stub.proxy ~= nil, "handleData: proxy é nulo! (stub.name=" .. stub.name ..")")
 
-	local ip = proxies[stub.name]._ip
-	local port = proxies[stub.name]._port
-	local sock = proxies[stub.name]._socket
+	local ip = stub.proxy._ip
+	local port = stub.proxy._port
+	local sock = stub.proxy._socket
 
 	logger("handleData", ip,port,sock)
 
 	--cria conexao do proxy com o servidor
 	if(sock == nil) then
 		logger("handleData", "criando conexão: " .. ip .. ":" .. port)
-		proxies[stub.name].proxy._socket = assert(socket.connect(ip,port))
-		proxies[stub.name].proxy._socket:setoption("tcp-nodelay", true)
-		proxies[stub.name].proxy._socket:setoption("reuseaddr", true)
-		sock = proxies[stub.name].proxy._socket
+		stub.proxy._socket = assert(socket.connect(ip,port))
+		stub.proxy._socket:setoption("tcp-nodelay", true)
+		stub.proxy._socket:setoption("reuseaddr", true)
+		sock = stub.proxy._socket
 	end
 
 	assert(sock ~= nil, "a conexão não foi estabelecida!")
 
 	--envia requisicao
-	ret,err=sock:send(request)]]--
+	ret,err=sock:send(request)
 end
 
 ------------------------------------------------------------------
@@ -225,12 +212,18 @@ end
 -- Parâmetros: 
 -- socket: Socket do cliente
 ------------------------------------------------------------------
-function handleConnection(socket)
+function handleConnection(sock)
 
-	local ip, port = socket:getsockname()
+	-- aceita pedido de conexao
+	local client = sock:accept()
+
+	--imprime ip e porta
+	local ip, port = sock:getsockname()
 	logger("handleConnection", "Tratando nova conexão para: " .. ip .. ":" .. port)
 
-	--TODO
+	--recebe requisicao
+	req, err = sock:receive("*a")
+	logger("handleConnection", "recebido: "..req)
 
 end
 
@@ -402,7 +395,7 @@ end
 -- Retorno:
 -- Stub (tabela Lua) que reflete a interface IDL
 ------------------------------------------------------------------
-function parseIDL(idlfile)
+function parseIDL(idlfile, proxy)
 
 	-- le arquivo da interface idl
 	local file = assert(io.open(idlfile,"r"))
@@ -434,7 +427,8 @@ function parseIDL(idlfile)
 		stub[method] = { 
 			name = method, 
 			result = { returntype }, 
-			args = { } 
+			args = { },
+			proxy = proxy or { }, 
 		}
 
 		--metatable dos metodos para possibilitar a chamada (__call)
